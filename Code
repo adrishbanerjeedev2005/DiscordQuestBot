@@ -2,7 +2,6 @@ import subprocess
 import time
 import requests
 import json
-import websocket
 import os
 import sys
 import platform
@@ -23,92 +22,111 @@ if getattr(sys, 'frozen', False):
     sys.stderr = open(os.devnull, 'w')
 
 # ─── Auto-install missing dependencies ─────────────────────────────────────
+def _pip(*args):
+    """Run a pip command silently, return True on success."""
+    try:
+        subprocess.check_call(
+            [sys.executable, '-m', 'pip'] + list(args),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        return True
+    except Exception:
+        return False
+
+def _has_wrong_websocket():
+    """Detect the wrong 'websocket' package without importing it."""
+    try:
+        out = subprocess.check_output(
+            [sys.executable, '-m', 'pip', 'show', 'websocket'],
+            stderr=subprocess.DEVNULL,
+        ).decode()
+        # pip show "websocket" means the WRONG package is installed
+        if 'Name: websocket' in out:
+            return True
+    except Exception:
+        pass
+    return False
+
 def install_dependencies():
     """Auto-install missing dependencies with a GUI window showing progress."""
-    required = {
-        'requests': 'requests',
-        'websocket': 'websocket-client',
-        'psutil': 'psutil'
-    }
-    
+    # ── Step 1: If the wrong 'websocket' package exists, remove it first ──
+    if _has_wrong_websocket():
+        _pip('uninstall', 'websocket', '-y', '-q')
+
+    # ── Step 2: Check what's actually missing (using subprocess, NOT import) ──
     missing = []
-    for module, package in required.items():
-        try:
-            __import__(module)
-        except ImportError:
-            missing.append(package)
-    
-    if missing:
-        # Create a simple progress window
-        progress_root = tk.Tk()
-        progress_root.title("Installing Dependencies")
-        progress_root.geometry("400x150")
-        progress_root.configure(bg='#0a0a16')
-        progress_root.resizable(False, False)
-        
-        # Center the window
-        progress_root.update_idletasks()
-        width = progress_root.winfo_width()
-        height = progress_root.winfo_height()
-        x = (progress_root.winfo_screenwidth() // 2) - (width // 2)
-        y = (progress_root.winfo_screenheight() // 2) - (height // 2)
-        progress_root.geometry(f'{width}x{height}+{x}+{y}')
-        
-        # Title
-        title = tk.Label(progress_root, text="Installing Dependencies", 
-                        fg='#e4e8ff', bg='#0a0a16',
-                        font=('Segoe UI', 12, 'bold'))
-        title.pack(pady=(20, 10))
-        
-        # Status
-        status = tk.Label(progress_root, text="Please wait...", 
-                         fg='#a0a4c8', bg='#0a0a16',
-                         font=('Segoe UI', 10))
-        status.pack(pady=5)
-        
-        # Progress bar (simple)
-        progress_bar = tk.Canvas(progress_root, height=6, 
-                                 bg='#13132a', highlightthickness=0)
-        progress_bar.pack(fill=tk.X, padx=40, pady=10)
-        progress_inner = tk.Canvas(progress_bar, height=6, 
-                                   bg='#7c6aff', highlightthickness=0)
-        progress_inner.place(x=0, y=0, width=0, height=6)
-        
-        progress_root.update()
-        
-        # Install packages
-        for i, package in enumerate(missing):
-            status.config(text=f"Installing {package}...")
-            progress_root.update()
-            
+    for pkg in ('requests', 'websocket-client', 'psutil'):
+        if _pip('show', pkg):
+            continue
+        # For websocket-client, also check if the module importable
+        if pkg == 'websocket-client':
             try:
-                subprocess.check_call([
-                    sys.executable, '-m', 'pip', 'install', 
-                    package, '--quiet', '--no-cache-dir'
-                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                
-                # Update progress
-                width = progress_bar.winfo_width()
-                progress_inner.config(width=int(width * (i + 1) / len(missing)))
-                progress_root.update()
-                
-            except Exception as e:
-                # If pip install fails, try with --user flag
-                try:
-                    subprocess.check_call([
-                        sys.executable, '-m', 'pip', 'install',
-                        package, '--quiet', '--user', '--no-cache-dir'
-                    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                except:
-                    pass
-        
-        status.config(text="Dependencies installed successfully!", fg='#00d68f')
+                import importlib
+                mod = importlib.import_module('websocket')
+                if hasattr(mod, 'create_connection'):
+                    continue          # correct package already usable
+            except ImportError:
+                pass
+        missing.append(pkg)
+
+    if not missing:
+        return
+
+    # ── Step 3: Show progress window and install ───────────────────────────
+    progress_root = tk.Tk()
+    progress_root.title("Installing Dependencies")
+    progress_root.geometry("400x150")
+    progress_root.configure(bg='#0a0a16')
+    progress_root.resizable(False, False)
+
+    progress_root.update_idletasks()
+    w = progress_root.winfo_width()
+    h = progress_root.winfo_height()
+    x = (progress_root.winfo_screenwidth() // 2) - (w // 2)
+    y = (progress_root.winfo_screenheight() // 2) - (h // 2)
+    progress_root.geometry(f'{w}x{h}+{x}+{y}')
+
+    tk.Label(progress_root, text="Installing Dependencies",
+             fg='#e4e8ff', bg='#0a0a16',
+             font=('Segoe UI', 12, 'bold')).pack(pady=(20, 10))
+
+    status = tk.Label(progress_root, text="Please wait...",
+                      fg='#a0a4c8', bg='#0a0a16',
+                      font=('Segoe UI', 10))
+    status.pack(pady=5)
+
+    bar = tk.Canvas(progress_root, height=6, bg='#13132a', highlightthickness=0)
+    bar.pack(fill=tk.X, padx=40, pady=10)
+    inner = tk.Canvas(bar, height=6, bg='#7c6aff', highlightthickness=0)
+    inner.place(x=0, y=0, width=0, height=6)
+    progress_root.update()
+
+    for i, pkg in enumerate(missing):
+        status.config(text=f"Installing {pkg}...")
         progress_root.update()
-        time.sleep(0.5)
-        progress_root.destroy()
+        ok = _pip('install', pkg, '--quiet', '--no-cache-dir')
+        if not ok:
+            _pip('install', pkg, '--quiet', '--user', '--no-cache-dir')
+        bw = bar.winfo_width()
+        inner.config(width=int(bw * (i + 1) / len(missing)))
+        progress_root.update()
+
+    # ── Step 4: Nuke the cached wrong module so fresh import works ─────────
+    for key in list(sys.modules):
+        if key == 'websocket' or key.startswith('websocket.'):
+            del sys.modules[key]
+
+    status.config(text="Dependencies installed successfully!", fg='#00d68f')
+    progress_root.update()
+    time.sleep(0.5)
+    progress_root.destroy()
 
 # ─── Install dependencies before starting ──────────────────────────────────
 install_dependencies()
+
+# Now import websocket — after installer has ensured websocket-client is present
+import importlib
+import websocket
 
 # ─── Theme ──────────────────────────────────────────────────────────────────
 TH = {
@@ -278,13 +296,22 @@ class StatTile:
         # label
         c.create_text(w // 2, h * 0.40, text=self._lbl,
                       fill=TH['txt3'], font=('Segoe UI Semibold', 7), anchor='center')
-        # value
-        # Truncate value if too long for the tile
+        # value — auto-scale font so full name fits
         display_val = self._val
-        if len(display_val) > 14:
-            display_val = display_val[:12] + '…'
+        vlen = len(display_val)
+        if vlen <= 8:
+            vfsize = 14
+        elif vlen <= 12:
+            vfsize = 12
+        elif vlen <= 18:
+            vfsize = 10
+        elif vlen <= 24:
+            vfsize = 9
+        else:
+            vfsize = 8
+            display_val = display_val[:22] + '…'
         c.create_text(w // 2, h * 0.72, text=display_val,
-                      fill=self._vc, font=('Segoe UI', 14, 'bold'), anchor='center')
+                      fill=self._vc, font=('Segoe UI', vfsize, 'bold'), anchor='center')
 
     def update(self, v):
         self._val = v
@@ -842,7 +869,9 @@ class QuestGUI:
             self._log('Could not find Discord debug endpoint.', 'error')
             return False
         try:
-            self.ws = websocket.create_connection(
+            # Re-import websocket to make sure we have the right module
+            import websocket as ws_module
+            self.ws = ws_module.create_connection(
                 ws_url, origin='http://localhost',
                 header={'Origin': 'http://localhost'})
             self.ws.send(json.dumps({'id': 1, 'method': 'Runtime.enable'}))
