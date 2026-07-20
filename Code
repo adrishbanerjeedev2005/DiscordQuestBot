@@ -1,0 +1,1097 @@
+import subprocess
+import time
+import requests
+import json
+import websocket
+import os
+import sys
+import platform
+import psutil
+import threading
+import math
+from datetime import datetime
+import tkinter as tk
+import atexit
+
+# ─── Disable console output ─────────────────────────────────────────────────
+if getattr(sys, 'frozen', False):
+    # Running as compiled exe - hide console
+    import ctypes
+    ctypes.windll.user32.ShowWindow(ctypes.windll.kernel32.GetConsoleWindow(), 0)
+    # Redirect stdout/stderr to null
+    sys.stdout = open(os.devnull, 'w')
+    sys.stderr = open(os.devnull, 'w')
+
+# ─── Auto-install missing dependencies ─────────────────────────────────────
+def install_dependencies():
+    """Auto-install missing dependencies with a GUI window showing progress."""
+    required = {
+        'requests': 'requests',
+        'websocket': 'websocket-client',
+        'psutil': 'psutil'
+    }
+    
+    missing = []
+    for module, package in required.items():
+        try:
+            __import__(module)
+        except ImportError:
+            missing.append(package)
+    
+    if missing:
+        # Create a simple progress window
+        progress_root = tk.Tk()
+        progress_root.title("Installing Dependencies")
+        progress_root.geometry("400x150")
+        progress_root.configure(bg='#0a0a16')
+        progress_root.resizable(False, False)
+        
+        # Center the window
+        progress_root.update_idletasks()
+        width = progress_root.winfo_width()
+        height = progress_root.winfo_height()
+        x = (progress_root.winfo_screenwidth() // 2) - (width // 2)
+        y = (progress_root.winfo_screenheight() // 2) - (height // 2)
+        progress_root.geometry(f'{width}x{height}+{x}+{y}')
+        
+        # Title
+        title = tk.Label(progress_root, text="Installing Dependencies", 
+                        fg='#e4e8ff', bg='#0a0a16',
+                        font=('Segoe UI', 12, 'bold'))
+        title.pack(pady=(20, 10))
+        
+        # Status
+        status = tk.Label(progress_root, text="Please wait...", 
+                         fg='#a0a4c8', bg='#0a0a16',
+                         font=('Segoe UI', 10))
+        status.pack(pady=5)
+        
+        # Progress bar (simple)
+        progress_bar = tk.Canvas(progress_root, height=6, 
+                                 bg='#13132a', highlightthickness=0)
+        progress_bar.pack(fill=tk.X, padx=40, pady=10)
+        progress_inner = tk.Canvas(progress_bar, height=6, 
+                                   bg='#7c6aff', highlightthickness=0)
+        progress_inner.place(x=0, y=0, width=0, height=6)
+        
+        progress_root.update()
+        
+        # Install packages
+        for i, package in enumerate(missing):
+            status.config(text=f"Installing {package}...")
+            progress_root.update()
+            
+            try:
+                subprocess.check_call([
+                    sys.executable, '-m', 'pip', 'install', 
+                    package, '--quiet', '--no-cache-dir'
+                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                
+                # Update progress
+                width = progress_bar.winfo_width()
+                progress_inner.config(width=int(width * (i + 1) / len(missing)))
+                progress_root.update()
+                
+            except Exception as e:
+                # If pip install fails, try with --user flag
+                try:
+                    subprocess.check_call([
+                        sys.executable, '-m', 'pip', 'install',
+                        package, '--quiet', '--user', '--no-cache-dir'
+                    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except:
+                    pass
+        
+        status.config(text="Dependencies installed successfully!", fg='#00d68f')
+        progress_root.update()
+        time.sleep(0.5)
+        progress_root.destroy()
+
+# ─── Install dependencies before starting ──────────────────────────────────
+install_dependencies()
+
+# ─── Theme ──────────────────────────────────────────────────────────────────
+TH = {
+    'bg':          '#0a0a16',
+    'surface':     '#0f0f1e',
+    'glass':       '#13132a',
+    'glass2':      '#181838',
+    'glass_hov':   '#1e1e42',
+    'border':      '#282850',
+    'border_lite': '#1c1c40',
+    'pri':         '#7c6aff',
+    'pri_hov':     '#9585ff',
+    'pri_act':     '#6050e0',
+    'pri_glow':    '#7c6aff30',
+    'green':       '#00d68f',
+    'green_hov':   '#00f0a0',
+    'green_act':   '#00b878',
+    'red':         '#ff5c7c',
+    'red_hov':     '#ff7a94',
+    'red_act':     '#e04060',
+    'yellow':      '#ffc048',
+    'cyan':        '#38d9f5',
+    'txt':         '#e4e8ff',
+    'txt2':        '#a0a4c8',
+    'txt3':        '#585c80',
+    'dim':         '#1e1e3a',
+    'input':       '#08081a',
+    'input_brd':   '#1a1a3c',
+}
+
+LOG_C = {
+    'success':   TH['green'],
+    'error':     TH['red'],
+    'warning':   TH['yellow'],
+    'info':      TH['cyan'],
+    'quest':     TH['pri_hov'],
+    'timestamp': '#3a3a68',
+}
+
+
+# ─── Rounded-rect ───────────────────────────────────────────────────────────
+def _rr(c, x1, y1, x2, y2, r=12, **kw):
+    pts = [
+        x1+r, y1,   x2-r, y1,
+        x2,   y1,   x2,   y1+r,
+        x2,   y2-r, x2,   y2,
+        x2-r, y2,   x1+r, y2,
+        x1,   y2,   x1,   y2-r,
+        x1,   y1+r, x1,   y1,
+        x1+r, y1,
+    ]
+    return c.create_polygon(pts, smooth=True, **kw)
+
+
+# ─── Animated pulse dot ─────────────────────────────────────────────────────
+class PulseDot:
+    def __init__(self, parent, size=7):
+        self.size = size
+        self.cv = tk.Canvas(parent, width=size + 10, height=size + 10,
+                            bg=TH['bg'], highlightthickness=0)
+        self._c = TH['txt3']
+        self._ph = 0.0
+        self._on = False
+        self._tick()
+
+    def pack(self, **kw):
+        self.cv.pack(**kw)
+
+    def _tick(self):
+        s = self.size
+        c = self.cv
+        c.delete('all')
+        cx = cy = (s + 10) // 2
+        d = s // 2
+        if self._on:
+            for ring in range(2):
+                rr = d + 2 + int(3 * abs(math.sin(self._ph - ring * 0.6)))
+                c.create_oval(cx - rr, cy - rr, cx + rr, cy + rr,
+                              outline=self._c, width=1)
+            self._ph += 0.2
+            c.after(50, self._tick)
+        c.create_oval(cx - d, cy - d, cx + d, cy + d, fill=self._c, outline='')
+
+    def set_state(self, st):
+        m = {'idle': (TH['txt3'], False), 'running': (TH['green'], True),
+             'stopped': (TH['yellow'], False), 'error': (TH['red'], False)}
+        self._c, self._on = m.get(st, (TH['txt3'], False))
+        self._ph = 0.0
+
+
+# ─── Progress bar ───────────────────────────────────────────────────────────
+class ProgressBar:
+    def __init__(self, parent, h=5):
+        self.h = h
+        self.cv = tk.Canvas(parent, height=h, bg=TH['glass'], highlightthickness=0, bd=0)
+        self._v = 0
+        self.cv.bind('<Configure>', self._draw)
+
+    def pack(self, **kw):
+        self.cv.pack(**kw)
+
+    def set(self, v):
+        self._v = max(0, min(100, v))
+        self._draw()
+
+    def _draw(self, *_):
+        c = self.cv
+        c.delete('all')
+        w = c.winfo_width()
+        if w < 4:
+            return
+        r = self.h // 2
+        # trough
+        _rr(c, 0, 0, w, self.h, r=r, fill=TH['dim'], outline='')
+        fw = int(w * self._v / 100)
+        if fw > self.h:
+            # gradient fill
+            steps = max(1, min(16, fw // 3))
+            for i in range(steps):
+                x1 = int(fw * i / steps)
+                x2 = int(fw * (i + 1) / steps)
+                t = i / max(steps - 1, 1)
+                # lerp from dark purple to bright purple
+                rr = int(100 + 34 * t)
+                gg = int(80 + 45 * t)
+                bb = int(210 + 45 * t)
+                col = f'#{rr:02x}{gg:02x}{bb:02x}'
+                rad = r if i == 0 else 0
+                _rr(c, x1, 0, x2, self.h, r=rad, fill=col, outline='')
+            # rounded end cap
+            _rr(c, max(0, fw - self.h), 0, fw, self.h, r=r, fill=TH['pri_hov'], outline='')
+            # tiny shimmer dot at the tip
+            c.create_oval(fw - 3, 0, fw + 1, self.h, fill='#ffffff', outline='')
+
+
+# ─── Stat tile ──────────────────────────────────────────────────────────────
+class StatTile:
+    def __init__(self, parent, label, val='—', vc=TH['txt']):
+        self.cv = tk.Canvas(parent, bg=TH['bg'], highlightthickness=0)
+        self.cv.bind('<Configure>', self._draw)
+        self._lbl = label
+        self._val = val
+        self._vc = vc
+        self._hov = False
+        self.cv.bind('<Enter>', lambda e: self._set_hov(True))
+        self.cv.bind('<Leave>', lambda e: self._set_hov(False))
+
+    def _set_hov(self, v):
+        self._hov = v
+        self._draw()
+
+    def _draw(self, *_):
+        c = self.cv
+        c.delete('all')
+        w, h = c.winfo_width(), c.winfo_height()
+        if w < 4:
+            return
+        bg = TH['glass_hov'] if self._hov else TH['glass']
+        brd = TH['border'] if self._hov else TH['border_lite']
+        # shadow
+        _rr(c, 3, 4, w, h + 1, r=14, fill='#000000', outline='')
+        # card body
+        _rr(c, 1, 1, w - 1, h - 2, r=14, fill=bg, outline=brd, width=1)
+        # accent bar
+        bar_w = 24
+        _rr(c, w // 2 - bar_w // 2, 4, w // 2 + bar_w // 2, 6, r=1, fill=self._vc, outline='')
+        # label
+        c.create_text(w // 2, h * 0.40, text=self._lbl,
+                      fill=TH['txt3'], font=('Segoe UI Semibold', 7), anchor='center')
+        # value
+        # Truncate value if too long for the tile
+        display_val = self._val
+        if len(display_val) > 14:
+            display_val = display_val[:12] + '…'
+        c.create_text(w // 2, h * 0.72, text=display_val,
+                      fill=self._vc, font=('Segoe UI', 14, 'bold'), anchor='center')
+
+    def update(self, v):
+        self._val = v
+        self._draw()
+
+    def grid(self, **kw):
+        self.cv.grid(**kw)
+
+
+# ─── Pill button ────────────────────────────────────────────────────────────
+class PillButton:
+    def __init__(self, parent, text, cmd, bg=TH['pri'], fg='#fff',
+                 hover_bg=None, active_bg=None,
+                 r=20, font=('Segoe UI Semibold', 9), state=tk.NORMAL):
+        self._cmd = cmd
+        self._bg = bg
+        self._fg = fg
+        self._hbg = hover_bg or bg
+        self._abg = active_bg or bg
+        self._r = r
+        self._enabled = state == tk.NORMAL
+        self._hov = False
+        self._prs = False
+
+        self.cv = tk.Canvas(parent,
+                            bg=parent['bg'] if hasattr(parent, '__getitem__') else TH['bg'],
+                            highlightthickness=0, height=36, cursor='hand2')
+        self._txt = text
+        self._font = font
+        self.cv.bind('<Configure>', self._draw)
+        self.cv.bind('<Button-1>', self._on_press)
+        self.cv.bind('<ButtonRelease-1>', self._on_rel)
+        self.cv.bind('<Enter>', self._on_enter)
+        self.cv.bind('<Leave>', self._on_leave)
+
+    def _draw(self, *_):
+        c = self.cv
+        c.delete('all')
+        w, h = c.winfo_width(), c.winfo_height()
+        if w < 4:
+            return
+        if not self._enabled:
+            bg, fg = TH['dim'], TH['txt3']
+            shadow = False
+        elif self._prs:
+            bg, fg = self._abg, self._fg
+            shadow = False
+        elif self._hov:
+            bg, fg = self._hbg, self._fg
+            shadow = True
+        else:
+            bg, fg = self._bg, self._fg
+            shadow = True
+        # soft shadow layers
+        if shadow:
+            for i in range(4, 0, -1):
+                _rr(c, 2, 2 + i, w - 2, h - 1 + i, r=self._r, fill='#000000', outline='')
+        # button body
+        _rr(c, 2, 2, w - 2, h - 2, r=self._r, fill=bg, outline='')
+        # inner highlight (subtle top edge)
+        if self._enabled and not self._prs:
+            _rr(c, 8, 3, w - 8, 6, r=2,
+                fill=self._hbg if self._hov else bg, outline='')
+        # text
+        c.create_text(w // 2, h // 2 + 1, text=self._txt, fill=fg, font=self._font)
+
+    def _on_press(self, e):
+        if self._enabled:
+            self._prs = True
+            self._draw()
+
+    def _on_rel(self, e):
+        if self._enabled and self._prs:
+            self._prs = False
+            self._draw()
+            self._cmd()
+
+    def _on_enter(self, e):
+        self._hov = True
+        self._draw()
+
+    def _on_leave(self, e):
+        self._hov = False
+        self._prs = False
+        self._draw()
+
+    def config_state(self, s):
+        self._enabled = s == tk.NORMAL
+        self.cv['cursor'] = 'hand2' if self._enabled else 'arrow'
+        self._draw()
+
+    def pack(self, **kw):
+        self.cv.pack(**kw)
+
+    def grid(self, **kw):
+        self.cv.grid(**kw)
+
+
+# ─── Custom scrollbar ───────────────────────────────────────────────────────
+class ThinScrollbar(tk.Canvas):
+    """A thin, rounded, auto-hiding scrollbar."""
+    def __init__(self, parent, command=None, **kw):
+        kw.setdefault('bg', TH['bg'])
+        super().__init__(parent, width=6, highlightthickness=0, bd=0, **kw)
+        self._cmd = command
+        self._dragging = False
+        self._top = 0.0
+        self._bot = 1.0
+        self.bind('<ButtonPress-1>', self._press)
+        self.bind('<B1-Motion>', self._drag)
+        self.bind('<ButtonRelease-1>', self._rel)
+        self.bind('<Configure>', lambda e: self._render())
+
+    def set(self, first, last):
+        self._top = float(first)
+        self._bot = float(last)
+        self._render()
+
+    def _render(self):
+        self.delete('all')
+        w = self.winfo_width()
+        h = self.winfo_height()
+        if h < 10 or self._bot - self._top >= 1.0:
+            return
+        y1 = max(2, int(h * self._top))
+        y2 = min(h - 2, int(h * self._bot))
+        if y2 - y1 < 14:
+            y2 = y1 + 14
+        _rr(self, 1, y1, w - 1, y2, r=3, fill=TH['border'], outline='')
+
+    def _press(self, e):
+        self._dragging = True
+        self._move_to(e.y)
+
+    def _drag(self, e):
+        if self._dragging:
+            self._move_to(e.y)
+
+    def _rel(self, e):
+        self._dragging = False
+
+    def _move_to(self, y):
+        h = self.winfo_height()
+        if h < 1 or not self._cmd:
+            return
+        self._cmd('moveto', str(y / h))
+
+
+# ─── Main GUI ────────────────────────────────────────────────────────────────
+class QuestGUI:
+    def __init__(self, root):
+        self.root = root
+        root.title('Quest Automator')
+        root.geometry('780x520')
+        root.minsize(640, 440)
+        root.configure(bg=TH['bg'])
+        root.option_add('*tearOff', False)
+        root.tk.call('tk', 'scaling', 1.25)
+
+        self.debug_port = 9222
+        self.running = False
+        self.quest_script = self._quest_js()
+        self.ws = None
+        self.monitor_thread = None
+        self.discord_process = None
+        self.log_count = 0
+
+        self._build()
+        self._check_discord()
+        root.protocol('WM_DELETE_WINDOW', self._on_close)
+        atexit.register(self._cleanup)
+
+    # ── Build ────────────────────────────────────────────────────────────
+    def _build(self):
+        root = self.root
+
+        # top accent gradient bar
+        acc = tk.Canvas(root, height=3, bg=TH['bg'], highlightthickness=0)
+        acc.pack(fill=tk.X)
+        acc.bind('<Configure>', self._draw_accent)
+
+        # ── Header ──────────────────────────────────────────────────────
+        hb = tk.Frame(root, bg=TH['surface'], height=48)
+        hb.pack(fill=tk.X)
+        hb.pack_propagate(False)
+
+        # logo container with glow
+        logo_frame = tk.Frame(hb, bg=TH['surface'])
+        logo_frame.pack(side=tk.LEFT, padx=(16, 8), pady=10)
+        logo_cv = tk.Canvas(logo_frame, width=30, height=30,
+                            bg=TH['surface'], highlightthickness=0)
+        logo_cv.pack()
+        self._draw_logo(logo_cv)
+
+        # title
+        title_f = tk.Frame(hb, bg=TH['surface'])
+        title_f.pack(side=tk.LEFT, pady=10)
+        tk.Label(title_f, text='Quest', fg=TH['pri_hov'], bg=TH['surface'],
+                 font=('Segoe UI', 14, 'bold')).pack(side=tk.LEFT)
+        tk.Label(title_f, text='  Automator', fg=TH['txt2'], bg=TH['surface'],
+                 font=('Segoe UI', 14)).pack(side=tk.LEFT)
+
+        # status pill
+        sp = tk.Frame(hb, bg=TH['glass'],
+                      highlightbackground=TH['border_lite'], highlightthickness=1)
+        sp.pack(side=tk.LEFT, padx=20)
+        sp_in = tk.Frame(sp, bg=TH['glass'])
+        sp_in.pack(padx=12, pady=5)
+        self.pulse = PulseDot(sp_in, size=6)
+        self.pulse.pack(side=tk.LEFT, padx=(0, 6))
+        self.status_lbl = tk.Label(sp_in, text='idle', fg=TH['txt3'],
+                                   bg=TH['glass'], font=('Segoe UI', 8))
+        self.status_lbl.pack(side=tk.LEFT)
+
+        # ── Body ────────────────────────────────────────────────────────
+        body = tk.Frame(root, bg=TH['bg'])
+        body.pack(fill=tk.BOTH, expand=True, padx=16, pady=(14, 0))
+
+        left = tk.Frame(body, bg=TH['bg'], width=250)
+        left.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 14))
+        left.pack_propagate(False)
+
+        right = tk.Frame(body, bg=TH['bg'])
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self._build_left(left)
+        self._build_right(right)
+
+        # ── Footer ──────────────────────────────────────────────────────
+        ft = tk.Frame(root, bg=TH['surface'], height=28)
+        ft.pack(fill=tk.X, side=tk.BOTTOM)
+        ft.pack_propagate(False)
+        self.footer_lbl = tk.Label(ft, text='Ready', fg=TH['txt3'],
+                                   bg=TH['surface'], font=('Segoe UI', 7))
+        self.footer_lbl.pack(side=tk.LEFT, padx=16)
+        tk.Label(ft, text='v1.0', fg=TH['border'], bg=TH['surface'],
+                 font=('Segoe UI', 7)).pack(side=tk.RIGHT, padx=16)
+
+    def _draw_accent(self, e):
+        c = e.widget
+        c.delete('all')
+        w = e.width
+        # gradient from left to right
+        steps = 40
+        for i in range(steps):
+            x1 = int(w * i / steps)
+            x2 = int(w * (i + 1) / steps) + 1
+            t = i / max(steps - 1, 1)
+            # purple to blue to purple arc
+            r = int(100 + 24 * math.sin(t * math.pi))
+            g = int(80 + 50 * math.sin(t * math.pi))
+            b = int(200 + 55 * math.sin(t * math.pi))
+            col = f'#{r:02x}{g:02x}{b:02x}'
+            c.create_rectangle(x1, 0, x2, 3, fill=col, outline='')
+
+    def _draw_logo(self, c):
+        cx, cy, r = 15, 15, 13
+        pts = []
+        for i in range(6):
+            a = math.pi / 6 + i * math.pi / 3
+            pts.append(cx + r * math.cos(a))
+            pts.append(cy + r * math.sin(a))
+        # glow rings
+        for i in range(3):
+            gr = r + 3 + i * 2
+            gpts = []
+            for j in range(6):
+                a = math.pi / 6 + j * math.pi / 3
+                gpts.append(cx + gr * math.cos(a))
+                gpts.append(cy + gr * math.sin(a))
+        c.create_polygon(pts, fill=TH['pri'], outline=TH['pri_hov'], width=1)
+        c.create_text(cx, cy + 1, text='Q', fill='#fff',
+                      font=('Segoe UI', 10, 'bold'))
+
+    def _build_left(self, p):
+        # ── Stats ───────────────────────────────────────────────────────
+        self._section(p, 'OVERVIEW')
+        sg = tk.Frame(p, bg=TH['bg'])
+        sg.pack(fill=tk.X, pady=(0, 14))
+        sg.columnconfigure((0, 1), weight=1)
+
+        self.st_total = StatTile(sg, 'TOTAL', '—', TH['pri_hov'])
+        self.st_done  = StatTile(sg, 'DONE', '0', TH['green'])
+        self.st_pct   = StatTile(sg, 'PROGRESS', '0%', TH['txt'])
+        self.st_spoof = StatTile(sg, 'SPOOFING', '—', TH['cyan'])
+
+        for i, sc in enumerate([self.st_total, self.st_done, self.st_pct, self.st_spoof]):
+            r, col = divmod(i, 2)
+            sc.cv.configure(height=68)
+            sc.grid(row=r, column=col, padx=4, pady=4, sticky='nsew')
+
+        # ── Quest card ──────────────────────────────────────────────────
+        self._section(p, 'CURRENT QUEST')
+        qc = tk.Canvas(p, bg=TH['bg'], highlightthickness=0, height=90)
+        qc.pack(fill=tk.X, pady=(0, 14))
+        qc.bind('<Configure>', lambda e, c=qc: self._draw_qcard(c))
+        self._qc = qc
+        self._qi = tk.Frame(qc, bg=TH['glass2'])
+        self._qw = qc.create_window(0, 0, anchor='nw', window=self._qi)
+
+        self.quest_lbl = tk.Label(self._qi, text='No quest active', fg=TH['txt2'],
+                                  bg=TH['glass2'], font=('Segoe UI', 10, 'bold'),
+                                  anchor='w', wraplength=200, justify='left')
+        self.quest_lbl.pack(fill=tk.X, padx=16, pady=(12, 6))
+
+        self.pbar = ProgressBar(self._qi, h=5)
+        self.pbar.pack(fill=tk.X, padx=16, pady=(0, 4))
+
+        pr = tk.Frame(self._qi, bg=TH['glass2'])
+        pr.pack(fill=tk.X, padx=16, pady=(0, 12))
+        tk.Label(pr, text='completion', fg=TH['txt3'], bg=TH['glass2'],
+                 font=('Segoe UI', 7)).pack(side=tk.LEFT)
+        self.pct_lbl = tk.Label(pr, text='0%', fg=TH['pri_hov'],
+                                bg=TH['glass2'], font=('Segoe UI', 8, 'bold'))
+        self.pct_lbl.pack(side=tk.RIGHT)
+
+        # ── Buttons ─────────────────────────────────────────────────────
+        self._section(p, 'ACTIONS')
+        bw = tk.Frame(p, bg=TH['bg'])
+        bw.pack(fill=tk.X)
+        bw.columnconfigure((0, 1), weight=1)
+
+        self.btn_start = PillButton(
+            bw, '▶  START', self._start,
+            bg=TH['green'], hover_bg=TH['green_hov'], active_bg=TH['green_act'],
+            fg='#fff', r=20)
+        self.btn_start.cv.configure(height=36)
+        self.btn_start.grid(row=0, column=0, padx=(0, 5), sticky='ew')
+
+        self.btn_stop = PillButton(
+            bw, '■  STOP', self._stop,
+            bg=TH['red'], hover_bg=TH['red_hov'], active_bg=TH['red_act'],
+            fg='#fff', r=20, state=tk.DISABLED)
+        self.btn_stop.cv.configure(height=36)
+        self.btn_stop.grid(row=0, column=1, sticky='ew')
+
+    def _draw_qcard(self, c):
+        c.delete('bg')
+        w, h = c.winfo_width(), c.winfo_height()
+        if w < 4:
+            return
+        # shadow
+        _rr(c, 3, 4, w, h + 1, r=14, fill='#000000', outline='', tags='bg')
+        # body
+        _rr(c, 1, 1, w - 1, h - 2, r=14, fill=TH['glass2'],
+            outline=TH['border_lite'], width=1, tags='bg')
+        c.tag_lower('bg')
+        pad = 8
+        c.itemconfig(self._qw, width=w - pad * 2, height=h - pad * 2)
+        c.coords(self._qw, pad, pad)
+
+    def _build_right(self, p):
+        # header row
+        hr = tk.Frame(p, bg=TH['bg'])
+        hr.pack(fill=tk.X, pady=(0, 8))
+
+        tk.Label(hr, text='ACTIVITY LOG', fg=TH['txt3'], bg=TH['bg'],
+                 font=('Segoe UI Semibold', 7)).pack(side=tk.LEFT)
+        self.log_cnt_lbl = tk.Label(hr, text='0', fg=TH['border'],
+                                    bg=TH['bg'], font=('Segoe UI', 7))
+        self.log_cnt_lbl.pack(side=tk.LEFT, padx=6)
+
+        clr = tk.Label(hr, text='✕  clear', fg=TH['txt3'], bg=TH['bg'],
+                       font=('Segoe UI', 7), cursor='hand2')
+        clr.pack(side=tk.RIGHT)
+        clr.bind('<Button-1>', lambda e: self._clear_log())
+        clr.bind('<Enter>', lambda e: clr.config(fg=TH['red']))
+        clr.bind('<Leave>', lambda e: clr.config(fg=TH['txt3']))
+
+        # log container
+        lc = tk.Canvas(p, bg=TH['bg'], highlightthickness=0)
+        lc.pack(fill=tk.BOTH, expand=True, pady=(0, 14))
+        li = tk.Frame(lc, bg=TH['input'])
+        self._lc = lc
+        self._li = li
+        self._lw = lc.create_window(0, 0, anchor='nw', window=li)
+        lc.bind('<Configure>', self._draw_log_bg)
+
+        # scrollbar
+        self._sb = ThinScrollbar(li)
+        self._sb.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 3), pady=3)
+
+        self.log_txt = tk.Text(li, bg=TH['input'], fg=TH['txt'],
+                               font=('Consolas', 9), relief=tk.FLAT, bd=0,
+                               wrap=tk.WORD, highlightthickness=0,
+                               insertbackground=TH['pri'], padx=14, pady=12,
+                               spacing1=1, spacing3=1,
+                               yscrollcommand=self._sb.set)
+        self.log_txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._sb._cmd = self.log_txt.yview
+
+        # alternating line bg
+        self.log_txt.tag_configure('alt_bg', background='#0c0c20')
+
+        for tag, col in LOG_C.items():
+            self.log_txt.tag_configure(tag, foreground=col)
+
+    def _draw_log_bg(self, *_):
+        c = self._lc
+        c.delete('bg')
+        w, h = c.winfo_width(), c.winfo_height()
+        if w < 4:
+            return
+        # shadow
+        _rr(c, 3, 4, w, h + 1, r=14, fill='#000000', outline='', tags='bg')
+        # body
+        _rr(c, 1, 1, w - 1, h - 2, r=14, fill=TH['input'],
+            outline=TH['input_brd'], width=1, tags='bg')
+        c.tag_lower('bg')
+        pad = 2
+        c.itemconfig(self._lw, width=w - pad * 2, height=h - pad * 2)
+        c.coords(self._lw, pad, pad)
+
+    # ── Helpers ──────────────────────────────────────────────────────────
+    def _section(self, p, title):
+        r = tk.Frame(p, bg=TH['bg'])
+        r.pack(fill=tk.X, pady=(0, 8))
+        tk.Label(r, text=title, fg=TH['txt3'], bg=TH['bg'],
+                 font=('Segoe UI Semibold', 7)).pack(side=tk.LEFT)
+        # subtle dotted line
+        tk.Frame(r, bg=TH['border_lite'], height=1).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 0), pady=4)
+
+    def _set_status(self, text, state='idle'):
+        self.pulse.set_state(state)
+        fg = {'running': TH['green'], 'stopped': TH['yellow'],
+              'error': TH['red']}.get(state, TH['txt3'])
+        self.status_lbl.config(text=text, fg=fg)
+
+    def _log(self, msg, tag='info'):
+        ts = datetime.now().strftime('%H:%M:%S')
+        self.log_txt.insert(tk.END, f'  {ts}  ', 'timestamp')
+        self.log_txt.insert(tk.END, f'{msg}\n', tag)
+        self.log_txt.see(tk.END)
+        self.log_count += 1
+        self.log_cnt_lbl.config(text=str(self.log_count))
+
+    def _clear_log(self):
+        self.log_txt.delete('1.0', tk.END)
+        self.log_count = 0
+        self.log_cnt_lbl.config(text='0')
+
+    # ── Discord management ──────────────────────────────────────────────
+    def _check_discord(self):
+        found = any('discord' in (p.info.get('name') or '').lower()
+                    for p in psutil.process_iter(['name']))
+        self._set_status('discord running' if found else 'idle',
+                         'running' if found else 'idle')
+        self.root.after(5000, self._check_discord)
+
+    def _kill_discord(self):
+        for proc in psutil.process_iter(['pid', 'name']):
+            try:
+                if 'discord' in (proc.info.get('name') or '').lower():
+                    proc.kill()
+            except Exception:
+                pass
+
+    def _launch_discord(self):
+        self._kill_discord()
+        time.sleep(2)
+        system = platform.system()
+        if system == 'Windows':
+            base = os.path.expandvars(r'%LOCALAPPDATA%\Discord')
+            exes = []
+            if os.path.exists(base):
+                for item in os.listdir(base):
+                    if item.startswith('app-'):
+                        p = os.path.join(base, item, 'Discord.exe')
+                        if os.path.exists(p):
+                            exes.append(p)
+            exes.sort(reverse=True)
+            path = exes[0] if exes else os.path.expandvars(r'%LOCALAPPDATA%\Discord\Discord.exe')
+        elif system == 'Darwin':
+            path = '/Applications/Discord.app/Contents/MacOS/Discord'
+        else:
+            path = 'discord'
+        self._log('Launching Discord with debug port…', 'info')
+        self.discord_process = subprocess.Popen([
+            path,
+            f'--remote-debugging-port={self.debug_port}',
+            '--remote-allow-origins=*',
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self._log('Waiting for Discord to load…', 'info')
+        time.sleep(15)
+        return True
+
+    def _get_ws_url(self):
+        for _ in range(30):
+            try:
+                res = requests.get(f'http://localhost:{self.debug_port}/json')
+                for page in res.json():
+                    if 'discord.com' in page.get('url', ''):
+                        return page['webSocketDebuggerUrl']
+                data = res.json()
+                if data:
+                    return data[0]['webSocketDebuggerUrl']
+            except Exception:
+                pass
+            time.sleep(2)
+        return None
+
+    # ── WebSocket injection ──────────────────────────────────────────────
+    def _monitor_ws(self):
+        try:
+            while self.running:
+                try:
+                    data = json.loads(self.ws.recv())
+                    if data.get('method') == 'Runtime.consoleAPICalled':
+                        for arg in data['params'].get('args', []):
+                            val = arg.get('value', '')
+                            if isinstance(val, str) and val.startswith('GUI:'):
+                                parts = val.split(':', 2)
+                                if len(parts) == 3:
+                                    self.root.after(0, self._handle, parts[1], parts[2])
+                except Exception:
+                    break
+        except Exception:
+            pass
+
+    def _handle(self, t, v):
+        if t == 'total':
+            self.st_total.update(v)
+        elif t == 'completed':
+            self.st_done.update(v)
+        elif t == 'progress':
+            try:
+                pct = int(v)
+                self.st_pct.update(f'{pct}%')
+                self.pbar.set(pct)
+                self.pct_lbl.config(text=f'{pct}%')
+            except ValueError:
+                pass
+        elif t == 'spoof':
+            # Truncate the game name to fit in the tile
+            if len(v) > 14:
+                short = v[:12] + '…'
+            else:
+                short = v
+            self.st_spoof.update(short)
+            self._log(f'spoofing  {v}', 'info')
+        elif t == 'quest':
+            self.quest_lbl.config(text=v)
+            self._log(f'starting  {v}', 'quest')
+        elif t == 'success':
+            self._log(f'✓  {v}', 'success')
+        elif t == 'error':
+            self._log(f'✗  {v}', 'error')
+        elif t == 'warning':
+            self._log(f'⚠  {v}', 'warning')
+
+    def _inject(self):
+        ws_url = self._get_ws_url()
+        if not ws_url:
+            self._log('Could not find Discord debug endpoint.', 'error')
+            return False
+        try:
+            self.ws = websocket.create_connection(
+                ws_url, origin='http://localhost',
+                header={'Origin': 'http://localhost'})
+            self.ws.send(json.dumps({'id': 1, 'method': 'Runtime.enable'}))
+            self.ws.recv()
+            self.monitor_thread = threading.Thread(target=self._monitor_ws, daemon=True)
+            self.monitor_thread.start()
+            self.ws.send(json.dumps({'id': 2, 'method': 'Runtime.evaluate',
+                                     'params': {'expression': self.quest_script,
+                                                'returnByValue': False}}))
+            self.ws.recv()
+            self._log('Script injected successfully.', 'success')
+            return True
+        except Exception as e:
+            self._log(f'Injection failed: {e}', 'error')
+            return False
+
+    # ── Lifecycle ────────────────────────────────────────────────────────
+    def _start(self):
+        if self.running:
+            return
+        self.running = True
+        self.btn_start.config_state(tk.DISABLED)
+        self.btn_stop.config_state(tk.NORMAL)
+        self._set_status('running', 'running')
+        self._clear_log()
+        self._log('Automation started.', 'info')
+        self.st_total.update('…')
+        self.st_done.update('0')
+        self.st_pct.update('0%')
+        self.st_spoof.update('—')
+        self.quest_lbl.config(text='Initialising…')
+        self.pbar.set(0)
+        self.pct_lbl.config(text='0%')
+        self.footer_lbl.config(text='Running — do not close Discord', fg=TH['green'])
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        try:
+            if not self._launch_discord():
+                self._log('Failed to launch Discord.', 'error')
+                self.root.after(0, self._stop)
+                return
+            if not self._inject():
+                self._log('Script injection failed.', 'error')
+                self.root.after(0, self._stop)
+                return
+            self._log('Running — press STOP when done.', 'info')
+            while self.running:
+                time.sleep(0.1)
+        except Exception as e:
+            self._log(f'Error: {e}', 'error')
+            self.root.after(0, self._stop)
+
+    def _stop(self):
+        self.running = False
+        self.btn_start.config_state(tk.NORMAL)
+        self.btn_stop.config_state(tk.DISABLED)
+        self._set_status('stopped', 'stopped')
+        if self.ws:
+            try:
+                self.ws.close()
+            except Exception:
+                pass
+            self.ws = None
+        self._log('Stopped.', 'warning')
+        self.footer_lbl.config(text='Stopped', fg=TH['yellow'])
+
+    def _cleanup(self):
+        self.running = False
+        if self.ws:
+            try:
+                self.ws.close()
+            except Exception:
+                pass
+        if self.discord_process:
+            try:
+                self.discord_process.terminate()
+            except Exception:
+                pass
+
+    def _on_close(self):
+        self._cleanup()
+        self.root.destroy()
+        sys.exit(0)
+
+    # ── Quest JS ─────────────────────────────────────────────────────────
+    def _quest_js(self):
+        return r"""
+delete window.$;
+let wpRequire = webpackChunkdiscord_app.push([[Symbol()], {}, r => r]);
+webpackChunkdiscord_app.pop();
+
+let ApplicationStreamingStore = Object.values(wpRequire.c).find(x => x?.exports?.A?.__proto__?.getStreamerActiveStreamMetadata).exports.A;
+let RunningGameStore = Object.values(wpRequire.c).find(x => x?.exports?.Ay?.getRunningGames).exports.Ay;
+let QuestsStore = Object.values(wpRequire.c).find(x => x?.exports?.A?.__proto__?.getQuest).exports.A;
+let ChannelStore = Object.values(wpRequire.c).find(x => x?.exports?.A?.__proto__?.getAllThreadsForParent).exports.A;
+let GuildChannelStore = Object.values(wpRequire.c).find(x => x?.exports?.Ay?.getSFWDefaultChannel).exports.Ay;
+let FluxDispatcher = Object.values(wpRequire.c).find(x => x?.exports?.h?.__proto__?.flushWaitQueue).exports.h;
+let api = Object.values(wpRequire.c).find(x => x?.exports?.Bo?.get).exports.Bo;
+
+const supportedTasks = ["WATCH_VIDEO", "PLAY_ON_DESKTOP", "STREAM_ON_DESKTOP", "PLAY_ACTIVITY", "WATCH_VIDEO_ON_MOBILE"]
+let quests = [...QuestsStore.quests.values()].filter(x => x.userStatus?.enrolledAt && !x.userStatus?.completedAt && new Date(x.config.expiresAt).getTime() > Date.now() && supportedTasks.find(y => Object.keys((x.config.taskConfig ?? x.config.taskConfigV2).tasks).includes(y)))
+let isApp = typeof DiscordNative !== "undefined"
+
+function sendStatus(msg, type) { console.log(`GUI:${type}:${msg}`); }
+
+let totalQuests = quests.length;
+let completedQuests = 0;
+sendStatus(`${totalQuests}`, 'total');
+sendStatus('0', 'completed');
+
+if(quests.length === 0) {
+    sendStatus('No quests found!', 'error');
+} else {
+    let doJob = function() {
+        const quest = quests.pop()
+        if(!quest) { sendStatus('All quests completed!', 'success'); return; }
+
+        const pid = Math.floor(Math.random() * 30000) + 1000
+        const applicationId = quest.config.application.id
+        const applicationName = quest.config.application.name
+        const questName = quest.config.messages.questName
+        const taskConfig = quest.config.taskConfig ?? quest.config.taskConfigV2
+        const taskName = supportedTasks.find(x => taskConfig.tasks[x] != null)
+        const secondsNeeded = taskConfig.tasks[taskName].target
+        let secondsDone = quest.userStatus?.progress?.[taskName]?.value ?? 0
+        const progressPercent = Math.round((secondsDone / secondsNeeded) * 100);
+
+        sendStatus(`${questName}`, 'quest');
+        sendStatus(`${applicationName}`, 'spoof');
+        sendStatus(`${progressPercent}`, 'progress');
+
+        if(taskName === "WATCH_VIDEO" || taskName === "WATCH_VIDEO_ON_MOBILE") {
+            const maxFuture = 10, speed = 7, interval = 1
+            const enrolledAt = new Date(quest.userStatus.enrolledAt).getTime()
+            let completed = false
+            let fn = async () => {
+                while(true) {
+                    const maxAllowed = Math.floor((Date.now() - enrolledAt)/1000) + maxFuture
+                    const diff = maxAllowed - secondsDone
+                    const timestamp = secondsDone + speed
+                    if(diff >= speed) {
+                        const res = await api.post({url: `/quests/${quest.id}/video-progress`, body: {timestamp: Math.min(secondsNeeded, timestamp + Math.random())}})
+                        completed = res.body.completed_at != null
+                        secondsDone = Math.min(secondsNeeded, timestamp)
+                        sendStatus(`${Math.round((secondsDone / secondsNeeded) * 100)}`, 'progress');
+                    }
+                    if(timestamp >= secondsNeeded) break
+                    await new Promise(resolve => setTimeout(resolve, interval * 1000))
+                }
+                if(!completed) await api.post({url: `/quests/${quest.id}/video-progress`, body: {timestamp: secondsNeeded}})
+                completedQuests++;
+                sendStatus(`${completedQuests}`, 'completed');
+                sendStatus(`${questName}`, 'success');
+                doJob()
+            }
+            fn()
+        } else if(taskName === "PLAY_ON_DESKTOP") {
+            if(!isApp) { sendStatus('Desktop app required!', 'error'); doJob(); return; }
+            api.get({url: `/applications/public?application_ids=${applicationId}`}).then(res => {
+                const appData = res.body[0]
+                const exeName = appData.executables?.find(x => x.os === "win32")?.name?.replace(">","") ?? appData.name.replace(/[\\/:*?"<>|]/g, "")
+                const fakeGame = {
+                    cmdLine: `C:\\Program Files\\${appData.name}\\${exeName}`,
+                    exeName, exePath: `c:/program files/${appData.name.toLowerCase()}/${exeName}`,
+                    hidden: false, isLauncher: false, id: applicationId, name: appData.name,
+                    pid, pidPath: [pid], processName: appData.name, start: Date.now(),
+                }
+                const realGames = RunningGameStore.getRunningGames()
+                const fakeGames = [fakeGame]
+                const realGetRunningGames = RunningGameStore.getRunningGames
+                const realGetGameForPID = RunningGameStore.getGameForPID
+                RunningGameStore.getRunningGames = () => fakeGames
+                RunningGameStore.getGameForPID = (pid) => fakeGames.find(x => x.pid === pid)
+                FluxDispatcher.dispatch({type: "RUNNING_GAMES_CHANGE", removed: realGames, added: [fakeGame], games: fakeGames})
+                let lastProgress = -1;
+                let fn = data => {
+                    let progress = quest.config.configVersion === 1 ? data.userStatus.streamProgressSeconds : Math.floor(data.userStatus.progress.PLAY_ON_DESKTOP.value)
+                    if(progress !== lastProgress) {
+                        sendStatus(`${Math.round((progress / secondsNeeded) * 100)}`, 'progress');
+                        lastProgress = progress;
+                    }
+                    if(progress >= secondsNeeded) {
+                        RunningGameStore.getRunningGames = realGetRunningGames
+                        RunningGameStore.getGameForPID = realGetGameForPID
+                        FluxDispatcher.dispatch({type: "RUNNING_GAMES_CHANGE", removed: [fakeGame], added: [], games: []})
+                        FluxDispatcher.unsubscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn)
+                        completedQuests++;
+                        sendStatus(`${completedQuests}`, 'completed');
+                        sendStatus(`${questName}`, 'success');
+                        doJob()
+                    }
+                }
+                FluxDispatcher.subscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn)
+            })
+        } else if(taskName === "STREAM_ON_DESKTOP") {
+            if(!isApp) { sendStatus('Desktop app required!', 'error'); doJob(); return; }
+            let realFunc = ApplicationStreamingStore.getStreamerActiveStreamMetadata
+            ApplicationStreamingStore.getStreamerActiveStreamMetadata = () => ({id: applicationId, pid, sourceName: null})
+            let lastProgress = -1;
+            let fn = data => {
+                let progress = quest.config.configVersion === 1 ? data.userStatus.streamProgressSeconds : Math.floor(data.userStatus.progress.STREAM_ON_DESKTOP.value)
+                if(progress !== lastProgress) {
+                    sendStatus(`${Math.round((progress / secondsNeeded) * 100)}`, 'progress');
+                    lastProgress = progress;
+                }
+                if(progress >= secondsNeeded) {
+                    ApplicationStreamingStore.getStreamerActiveStreamMetadata = realFunc
+                    FluxDispatcher.unsubscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn)
+                    completedQuests++;
+                    sendStatus(`${completedQuests}`, 'completed');
+                    sendStatus(`${questName}`, 'success');
+                    doJob()
+                }
+            }
+            FluxDispatcher.subscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn)
+            sendStatus('Need 1+ person in VC to stream', 'warning');
+        } else if(taskName === "PLAY_ACTIVITY") {
+            const channelId = ChannelStore.getSortedPrivateChannels()[0]?.id ?? Object.values(GuildChannelStore.getAllGuilds()).find(x => x != null && x.VOCAL.length > 0).VOCAL[0].channel.id
+            const streamKey = `call:${channelId}:1`
+            let fn = async () => {
+                while(true) {
+                    const res = await api.post({url: `/quests/${quest.id}/heartbeat`, body: {stream_key: streamKey, terminal: false}})
+                    const progress = res.body.progress.PLAY_ACTIVITY.value
+                    sendStatus(`${Math.round((progress / secondsNeeded) * 100)}`, 'progress');
+                    await new Promise(resolve => setTimeout(resolve, 20 * 1000))
+                    if(progress >= secondsNeeded) {
+                        await api.post({url: `/quests/${quest.id}/heartbeat`, body: {stream_key: streamKey, terminal: true}})
+                        break
+                    }
+                }
+                completedQuests++;
+                sendStatus(`${completedQuests}`, 'completed');
+                sendStatus(`${questName}`, 'success');
+                doJob()
+            }
+            fn()
+        }
+    }
+    doJob()
+}
+"""
+
+
+def main():
+    root = tk.Tk()
+    app = QuestGUI(root)
+    root.mainloop()
+
+
+if __name__ == '__main__':
+    main()
