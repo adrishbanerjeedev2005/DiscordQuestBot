@@ -1,5 +1,5 @@
 # Discord Quest Bot
-![image alt] (https://github.com/adrishbanerjeedev2005/DiscordQuestBot/blob/93c2438ab952fede5497c4d3895940eea049234b/Screenshot%20(126).png)
+![image alt](https://github.com/adrishbanerjeedev2005/DiscordQuestBot/blob/main/Screenshot%20(126).png?raw=true))
 A lightweight Python script that automates supported Discord Quests without requiring users to manually download the script.
 
 > ⚠️ This project is open source. You can inspect the source code before running it.
