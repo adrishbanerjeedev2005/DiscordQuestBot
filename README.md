@@ -56,4 +56,4 @@ Using automation tools may violate Discord's Terms of Service. You are responsib
 
 ---
 
-Made with ❤️ by **DecentInhell**
+Made with ❤️ by **Adrish**
